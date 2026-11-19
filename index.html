@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Intereses punitorios desde Excel</title>
+<title>Intereses ARCA desde Excel</title>
 <style>
   :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#667085; --line:#e3e6ec; --accent:#1f5fbf; --err:#b42318; --ok:#067647; }
   @media (prefers-color-scheme: dark) { :root { --bg:#14171d; --card:#1c2029; --fg:#e8eaf0; --muted:#98a1b3; --line:#2b3140; --accent:#6ea2f0; --err:#f97066; --ok:#47cd89; } }
@@ -33,23 +33,34 @@
 </head>
 <body>
 <main>
-  <h1>Intereses punitorios desde Excel</h1>
-  <p class="sub">Mismo cálculo que el servicio de ARCA/AFIP, aplicado a todas las filas de un Excel. El archivo se procesa en tu navegador y no se sube a ningún lado.</p>
+  <h1>Intereses ARCA desde Excel</h1>
+  <p class="sub">Mismo cálculo que el servicio de ARCA/AFIP (resarcitorios y punitorios), aplicado a todas las filas de un Excel. El archivo se procesa en tu navegador y no se sube a ningún lado.</p>
 
   <div class="card">
     <div class="drop" id="drop">Arrastrá un Excel (.xlsx, .xls, .csv) o hacé clic para elegirlo
       <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden>
     </div>
-    <div class="note">Necesita una fila de encabezados y una columna de fecha de inicio, una de importe y, opcionalmente, una de fecha de pago.</div>
+    <div class="note">Necesita una fila de encabezados (no hace falta que sea la primera), una columna de fecha de inicio y una de importe.</div>
   </div>
 
   <div class="card" id="map" hidden>
     <div class="grid">
-      <div><label for="cDesde">Fecha de inicio (demanda / vencimiento)</label><select id="cDesde"></select></div>
-      <div><label for="cHasta">Fecha de pago</label><select id="cHasta"></select></div>
-      <div><label for="cImp">Importe</label><select id="cImp"></select></div>
-      <div><label for="fHasta">Fecha de pago única (si no hay columna)</label><input type="date" id="fHasta"></div>
+      <div id="sheetBox" hidden><label for="sheet">Hoja</label><select id="sheet"></select></div>
+      <div><label for="tipo">Tipo de interés</label>
+        <select id="tipo"><option value="res">Resarcitorios</option><option value="pun">Punitorios</option></select></div>
+      <div><label for="modo">Modo de cálculo</label>
+        <select id="modo">
+          <option value="hasta">Hasta una fecha (deuda sin pagos)</option>
+          <option value="pago">Pago a cuenta (más interés sobre el interés)</option>
+        </select></div>
     </div>
+    <div class="grid" style="margin-top:12px">
+      <div><label for="cDesde">Fecha de inicio (vencimiento)</label><select id="cDesde"></select></div>
+      <div><label for="cHasta" id="lHasta">Fecha de pago (opcional)</label><select id="cHasta"></select></div>
+      <div><label for="cImp">Importe</label><select id="cImp"></select></div>
+      <div><label for="fHasta" id="lFecha">Fecha de pago única (si no hay columna)</label><input type="date" id="fHasta"></div>
+    </div>
+    <div class="note" id="modoNote" hidden>Interés sobre el pago, desde el vencimiento hasta la fecha de pago, más interés sobre ese interés, desde la fecha de pago hasta la fecha de cálculo. Los importes negativos se toman en positivo.</div>
     <div class="row"><button id="go">Calcular</button><span id="msg"></span></div>
   </div>
 
@@ -68,7 +79,7 @@
 <script src="calc.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let headers = [], rows = [], out = null;
+let wbk = null, headers = [], rows = [], out = null;
 
 // ---- lectura de archivo
 const drop = $('drop'), file = $('file');
@@ -79,17 +90,27 @@ drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.da
 file.onchange = () => file.files[0] && load(file.files[0]);
 
 async function load(f) {
-  const wb = /\.csv$/i.test(f.name)
+  wbk = /\.csv$/i.test(f.name)
     ? XLSX.read(await f.text(), { type: 'string', raw: true })   // sin reinterpretar fechas ni decimales
     : XLSX.read(await f.arrayBuffer(), { type: 'array' });
-  const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
-  if (data.length < 2) { alert('El archivo no tiene datos.'); return; }
-  headers = data[0].map((h, i) => String(h).trim() || 'Columna ' + (i + 1));
-  rows = data.slice(1).filter(r => r.some(c => c !== ''));
-  fill('cDesde', /desde|inicio|venc|demanda/i, false);
-  fill('cHasta', /hasta|pago|fin/i, true);
-  fill('cImp', /import|capital|monto|deuda|saldo/i, false);
+  $('sheet').innerHTML = wbk.SheetNames.map((n, i) => `<option value="${i}">${n.replace(/</g, '&lt;')}</option>`).join('');
+  $('sheetBox').hidden = wbk.SheetNames.length < 2;
+  loadSheet();
+}
+$('sheet').onchange = loadSheet;
+
+function loadSheet() {
+  const data = XLSX.utils.sheet_to_json(wbk.Sheets[wbk.SheetNames[+$('sheet').value]], { header: 1, raw: true, defval: '' });
+  // la fila de encabezados es la primera con al menos 2 celdas de texto
+  const hi = data.findIndex(r => r.filter(c => typeof c === 'string' && c.trim() !== '').length >= 2);
+  if (hi < 0 || data.length < hi + 2) { alert('No encontré encabezados y datos en esta hoja.'); return; }
+  headers = data[hi].map((h, i) => String(h).trim() || 'Columna ' + (i + 1));
+  rows = data.slice(hi + 1).map((r, i) => ({ r, n: hi + i + 2 })).filter(x => x.r.some(c => c !== ''));
+  fill('cDesde', /vcto|venc|desde|inicio|demanda/i, false);
+  fill('cHasta', /fecha.?pago|hasta|fin/i, true);
+  fill('cImp', /^pago|import|capital|monto|deuda|saldo/i, false);
   $('map').hidden = false; $('res').hidden = true; $('msg').textContent = rows.length + ' filas leídas.';
+  modoUI();
 }
 function fill(id, rx, optional) {
   const s = $(id);
@@ -97,6 +118,13 @@ function fill(id, rx, optional) {
     headers.map((h, i) => `<option value="${i}">${h.replace(/</g, '&lt;')}</option>`).join('');
   const g = headers.findIndex(h => rx.test(h));
   if (g >= 0) s.value = g; else if (optional) s.value = -1;
+}
+$('modo').onchange = modoUI;
+function modoUI() {
+  const pago = $('modo').value === 'pago';
+  $('lHasta').textContent = pago ? 'Fecha de pago' : 'Fecha de pago (opcional)';
+  $('lFecha').textContent = pago ? 'Fecha de cálculo (hasta cuándo corren los intereses)' : 'Fecha de pago única (si no hay columna)';
+  $('modoNote').hidden = !pago;
 }
 
 // ---- conversión de valores
@@ -119,40 +147,59 @@ const money = n => n.toLocaleString('es-AR', { minimumFractionDigits: 2, maximum
 // ---- cálculo
 $('go').onclick = () => {
   const iD = +$('cDesde').value, iH = +$('cHasta').value, iI = +$('cImp').value;
+  const tipo = $('tipo').value, pago = $('modo').value === 'pago';
   const fu = $('fHasta').value ? toDate($('fHasta').value) : 0;
-  if (iH < 0 && !fu) { $('msg').innerHTML = '<span class="err">Elegí una columna de fecha de pago o una fecha única.</span>'; return; }
+  if (pago && (iH < 0 || !fu)) { $('msg').innerHTML = '<span class="err">En este modo elegí la columna de fecha de pago y la fecha de cálculo.</span>'; return; }
+  if (!pago && iH < 0 && !fu) { $('msg').innerHTML = '<span class="err">Elegí una columna de fecha de pago o una fecha única.</span>'; return; }
   const res = [], det = [];
-  rows.forEach((r, k) => {
-    const d = toDate(r[iD]), h = iH >= 0 ? toDate(r[iH]) : fu, imp = toNum(r[iI]);
-    const c = AfipPunitorios.calcular(d, h, imp);
-    res.push({ r, d, h, imp, c });
-    if (!c.error) c.tramos.forEach(t => det.push({ Fila: k + 2, Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: imp, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
+  let omit = 0;
+  rows.forEach(({ r, n }) => {
+    if (r[iD] === '') { omit++; return; }   // sin fecha de inicio: totales o filas vacías
+    const d = toDate(r[iD]), imp = Math.abs(toNum(r[iI]));
+    const h = iH >= 0 ? toDate(r[iH]) : fu;
+    let c = AfipPunitorios.calcular(d, h, imp, tipo), i1 = 0, i2 = 0, t2 = [];
+    if (!c.error) {
+      i1 = c.interes;
+      if (pago && h < fu) {
+        const c2 = AfipPunitorios.calcular(h, fu, i1, tipo);   // interés sobre el interés
+        if (c2.error) c = c2; else { i2 = c2.interes; t2 = c2.tramos; }
+      }
+    }
+    const x = { r, d, h, imp, i1, i2, c, interes: c.error ? 0 : +(i1 + i2).toFixed(2) };
+    res.push(x);
+    if (!c.error) {
+      c.tramos.forEach(t => det.push({ Fila: n, Concepto: pago ? 'Interés s/ importe' : 'Interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: imp, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
+      t2.forEach(t => det.push({ Fila: n, Concepto: 'Interés s/ interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: i1, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
+    }
   });
-  out = { res, det };
-  render(res);
+  out = { res, det, pago };
+  render(res, omit);
 };
 
-function render(res) {
+function render(res, omit) {
   let total = 0, errs = 0;
   const head = `<tr>${headers.map(h => `<th>${h.replace(/</g, '&lt;')}</th>`).join('')}<th>Interés</th><th>Total</th></tr>`;
   const body = res.map(x => {
-    const cells = x.r.map((v, i) => `<td>${String(v).replace(/</g, '&lt;')}</td>`).join('') + '<td></td>'.repeat(Math.max(0, headers.length - x.r.length));
+    const cells = headers.map((_, i) => `<td>${String(x.r[i] ?? '').replace(/</g, '&lt;')}</td>`).join('');
     if (x.c.error) { errs++; return `<tr>${cells}<td class="err" colspan="2">${x.c.error}</td></tr>`; }
-    total += x.c.interes;
-    return `<tr>${cells}<td class="n">${money(x.c.interes)}</td><td class="n">${money(x.imp + x.c.interes)}</td></tr>`;
+    total += x.interes;
+    return `<tr>${cells}<td class="n">${money(x.interes)}</td><td class="n">${money(x.imp + x.interes)}</td></tr>`;
   }).join('');
   $('tbl').innerHTML = head + body;
-  $('sum').innerHTML = `Interés total: ${money(total)}` + (errs ? ` · <span class="err">${errs} fila(s) con error</span>` : ' · <span class="ok">sin errores</span>');
+  $('sum').innerHTML = `Interés total: ${money(total)}` + (errs ? ` · <span class="err">${errs} fila(s) con error</span>` : ' · <span class="ok">sin errores</span>') + (omit ? ` · ${omit} fila(s) sin fecha de inicio omitidas` : '');
   $('res').hidden = false; $('msg').textContent = '';
 }
 
 $('dl').onclick = () => {
-  const aoa = [[...headers, 'Interés', 'Total', 'Error']];
-  out.res.forEach(x => aoa.push([...x.r, ...(x.c.error ? ['', '', x.c.error] : [x.c.interes, +(x.imp + x.c.interes).toFixed(2), ''])]));
+  const extra = out.pago ? ['Interés s/ importe', 'Interés s/ interés'] : [];
+  const aoa = [[...headers, ...extra, 'Interés', 'Total', 'Error']];
+  out.res.forEach(x => aoa.push([...headers.map((_, i) => x.r[i] ?? ''),
+    ...(x.c.error ? [...extra.map(() => ''), '', '', x.c.error]
+                  : [...(out.pago ? [x.i1, x.i2] : []), x.interes, +(x.imp + x.interes).toFixed(2), ''])]));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Intereses');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out.det), 'Detalle');
-  XLSX.writeFile(wb, 'intereses_punitorios.xlsx');
+  XLSX.writeFile(wb, 'intereses_arca.xlsx');
 };
 </script>
 </body>

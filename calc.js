@@ -1,4 +1,4 @@
-// Cálculo de intereses punitorios de AFIP/ARCA.
+// Cálculo de intereses punitorios y resarcitorios de AFIP/ARCA.
 // Port fiel del algoritmo de https://serviciosweb.afip.gob.ar/genericos/calculoInteres/punitorios.aspx
 // (funciones_puni.js v2.1.2.0): meses de 30 días, interés por tramo de tasa, redondeo a 2 decimales por tramo.
 // Fechas como enteros yyyymmdd. Tasas en % mensual, vigentes desde la fecha indicada.
@@ -64,8 +64,10 @@
     thas[n - 1] = FMAX;
   })();
 
-  // desde/hasta: enteros yyyymmdd. Devuelve {interes, tramos:[{desde,hasta,tasaMensual,tasaDiaria,interes}]} o {error}.
-  function calcular(desde, hasta, importe) {
+  // desde/hasta: enteros yyyymmdd. tipo: 'pun' (punitorios, por defecto) o 'res' (resarcitorios).
+  // Devuelve {interes, tramos:[{desde,hasta,tasaMensual,tasaDiaria,interes}]} o {error}.
+  function calcular(desde, hasta, importe, tipo) {
+    var col = tipo === 'res' ? 2 : 1;
     if (!esFecha(desde)) return { error: 'Fecha de inicio inválida' };
     if (!esFecha(hasta)) return { error: 'Fecha de pago inválida' };
     if (desde < FMIN) return { error: 'La fecha de inicio debe ser igual o mayor que 27/01/1988' };
@@ -85,7 +87,7 @@
         else if (!todo) ch = thas[x];
         else { cd = tdes[x]; ch = thas[x]; }
         var dif = difFecha(ch, cd);
-        var t = TASAS[x][1];
+        var t = TASAS[x][col];
         var int = redondeo((dif[0] + dif[1] / 30) * t * importe / 100, 2);
         tramos.push({ desde: diaMas(cd), hasta: ch, dias: dif[0] * 30 + dif[1], tasaMensual: t, tasaDiaria: redondeo(t / 30, 6), interes: int });
         total += int;
