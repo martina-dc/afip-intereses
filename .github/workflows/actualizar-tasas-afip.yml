@@ -1,0 +1,29 @@
+name: Actualizar tasas AFIP
+
+on:
+  schedule:
+    - cron: '0 11 * * *'   # todos los días, 08:00 hora Argentina
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Descargar tasas desde AFIP
+        run: node actualizar_tasas.js
+      - name: Commit si hubo cambios
+        run: |
+          if [ -n "$(git status --porcelain tasas.js)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add tasas.js
+            git commit -m "Actualizar tasas punitorias AFIP"
+            git push
+          fi

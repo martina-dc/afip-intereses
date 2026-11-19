@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intereses punitorios desde Excel</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2330; --muted:#667085; --line:#e3e6ec; --accent:#1f5fbf; --err:#b42318; --ok:#067647; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14171d; --card:#1c2029; --fg:#e8eaf0; --muted:#98a1b3; --line:#2b3140; --accent:#6ea2f0; --err:#f97066; --ok:#47cd89; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { margin:0 0 20px; color:var(--muted); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:28px; text-align:center; cursor:pointer; color:var(--muted); }
+  .drop.over { border-color:var(--accent); color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  label { display:block; font-size:13px; color:var(--muted); margin-bottom:4px; }
+  select,input[type=date] { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); font:inherit; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:9px 16px; font:inherit; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:12px; align-items:end; flex-wrap:wrap; margin-top:12px; }
+  .tablewrap { overflow:auto; max-height:420px; border:1px solid var(--line); border-radius:6px; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th,td { padding:6px 10px; text-align:left; white-space:nowrap; border-bottom:1px solid var(--line); }
+  th { position:sticky; top:0; background:var(--card); }
+  td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .err { color:var(--err); } .ok { color:var(--ok); }
+  .note { font-size:13px; color:var(--muted); margin-top:8px; }
+  code { background:var(--bg); padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Intereses punitorios desde Excel</h1>
+  <p class="sub">Mismo cálculo que el servicio de ARCA/AFIP, aplicado a todas las filas de un Excel. El archivo se procesa en tu navegador y no se sube a ningún lado.</p>
+
+  <div class="card">
+    <div class="drop" id="drop">Arrastrá un Excel (.xlsx, .xls, .csv) o hacé clic para elegirlo
+      <input type="file" id="file" accept=".xlsx,.xls,.csv" hidden>
+    </div>
+    <div class="note">Necesita una fila de encabezados y una columna de fecha de inicio, una de importe y, opcionalmente, una de fecha de pago.</div>
+  </div>
+
+  <div class="card" id="map" hidden>
+    <div class="grid">
+      <div><label for="cDesde">Fecha de inicio (demanda / vencimiento)</label><select id="cDesde"></select></div>
+      <div><label for="cHasta">Fecha de pago</label><select id="cHasta"></select></div>
+      <div><label for="cImp">Importe</label><select id="cImp"></select></div>
+      <div><label for="fHasta">Fecha de pago única (si no hay columna)</label><input type="date" id="fHasta"></div>
+    </div>
+    <div class="row"><button id="go">Calcular</button><span id="msg"></span></div>
+  </div>
+
+  <div class="card" id="res" hidden>
+    <div class="row" style="margin:0 0 12px;align-items:center">
+      <strong id="sum"></strong>
+      <button id="dl" style="margin-left:auto">Descargar Excel</button>
+    </div>
+    <div class="tablewrap"><table id="tbl"></table></div>
+    <div class="note">Los intereses son simples y se calculan por tramo de tasa vigente (meses de 30 días), como en AFIP. El Excel descargado trae además la hoja <code>Detalle</code> con cada tramo.</div>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="tasas.js"></script>
+<script src="calc.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let headers = [], rows = [], out = null;
+
+// ---- lectura de archivo
+const drop = $('drop'), file = $('file');
+drop.onclick = () => file.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]); };
+file.onchange = () => file.files[0] && load(file.files[0]);
+
+async function load(f) {
+  const wb = /\.csv$/i.test(f.name)
+    ? XLSX.read(await f.text(), { type: 'string', raw: true })   // sin reinterpretar fechas ni decimales
+    : XLSX.read(await f.arrayBuffer(), { type: 'array' });
+  const data = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+  if (data.length < 2) { alert('El archivo no tiene datos.'); return; }
+  headers = data[0].map((h, i) => String(h).trim() || 'Columna ' + (i + 1));
+  rows = data.slice(1).filter(r => r.some(c => c !== ''));
+  fill('cDesde', /desde|inicio|venc|demanda/i, false);
+  fill('cHasta', /hasta|pago|fin/i, true);
+  fill('cImp', /import|capital|monto|deuda|saldo/i, false);
+  $('map').hidden = false; $('res').hidden = true; $('msg').textContent = rows.length + ' filas leídas.';
+}
+function fill(id, rx, optional) {
+  const s = $(id);
+  s.innerHTML = (optional ? '<option value="-1">— ninguna —</option>' : '') +
+    headers.map((h, i) => `<option value="${i}">${h.replace(/</g, '&lt;')}</option>`).join('');
+  const g = headers.findIndex(h => rx.test(h));
+  if (g >= 0) s.value = g; else if (optional) s.value = -1;
+}
+
+// ---- conversión de valores
+function toDate(v) {            // -> yyyymmdd o 0
+  if (typeof v === 'number') { const p = XLSX.SSF.parse_date_code(v); return p ? p.y * 10000 + p.m * 100 + p.d : 0; }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/); if (m) return +m[3] * 10000 + +m[2] * 100 + +m[1];
+  m = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/); if (m) return +m[1] * 10000 + +m[2] * 100 + +m[3];
+  return 0;
+}
+function toNum(v) {
+  if (typeof v === 'number') return v;
+  let s = String(v).replace(/[^\d.,\-]/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  return parseFloat(s);
+}
+const fd = n => n ? `${String(n % 100).padStart(2, '0')}/${String(Math.floor(n / 100) % 100).padStart(2, '0')}/${Math.floor(n / 10000)}` : '';
+const money = n => n.toLocaleString('es-AR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+// ---- cálculo
+$('go').onclick = () => {
+  const iD = +$('cDesde').value, iH = +$('cHasta').value, iI = +$('cImp').value;
+  const fu = $('fHasta').value ? toDate($('fHasta').value) : 0;
+  if (iH < 0 && !fu) { $('msg').innerHTML = '<span class="err">Elegí una columna de fecha de pago o una fecha única.</span>'; return; }
+  const res = [], det = [];
+  rows.forEach((r, k) => {
+    const d = toDate(r[iD]), h = iH >= 0 ? toDate(r[iH]) : fu, imp = toNum(r[iI]);
+    const c = AfipPunitorios.calcular(d, h, imp);
+    res.push({ r, d, h, imp, c });
+    if (!c.error) c.tramos.forEach(t => det.push({ Fila: k + 2, Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: imp, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
+  });
+  out = { res, det };
+  render(res);
+};
+
+function render(res) {
+  let total = 0, errs = 0;
+  const head = `<tr>${headers.map(h => `<th>${h.replace(/</g, '&lt;')}</th>`).join('')}<th>Interés</th><th>Total</th></tr>`;
+  const body = res.map(x => {
+    const cells = x.r.map((v, i) => `<td>${String(v).replace(/</g, '&lt;')}</td>`).join('') + '<td></td>'.repeat(Math.max(0, headers.length - x.r.length));
+    if (x.c.error) { errs++; return `<tr>${cells}<td class="err" colspan="2">${x.c.error}</td></tr>`; }
+    total += x.c.interes;
+    return `<tr>${cells}<td class="n">${money(x.c.interes)}</td><td class="n">${money(x.imp + x.c.interes)}</td></tr>`;
+  }).join('');
+  $('tbl').innerHTML = head + body;
+  $('sum').innerHTML = `Interés total: ${money(total)}` + (errs ? ` · <span class="err">${errs} fila(s) con error</span>` : ' · <span class="ok">sin errores</span>');
+  $('res').hidden = false; $('msg').textContent = '';
+}
+
+$('dl').onclick = () => {
+  const aoa = [[...headers, 'Interés', 'Total', 'Error']];
+  out.res.forEach(x => aoa.push([...x.r, ...(x.c.error ? ['', '', x.c.error] : [x.c.interes, +(x.imp + x.c.interes).toFixed(2), ''])]));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Intereses');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out.det), 'Detalle');
+  XLSX.writeFile(wb, 'intereses_punitorios.xlsx');
+};
+</script>
+</body>
+</html>
