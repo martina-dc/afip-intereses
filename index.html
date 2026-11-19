@@ -79,7 +79,7 @@
 <script src="calc.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-let wbk = null, headers = [], rows = [], out = null;
+let wbk = null, headers = [], rows = [], out = null, dateCols = new Set();
 
 // ---- lectura de archivo
 const drop = $('drop'), file = $('file');
@@ -100,12 +100,26 @@ async function load(f) {
 $('sheet').onchange = loadSheet;
 
 function loadSheet() {
-  const data = XLSX.utils.sheet_to_json(wbk.Sheets[wbk.SheetNames[+$('sheet').value]], { header: 1, raw: true, defval: '' });
+  const ws = wbk.Sheets[wbk.SheetNames[+$('sheet').value]];
+  const data = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  // columnas con formato de fecha en el Excel (los valores vienen como números de serie)
+  dateCols = new Set();
+  const rg = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  for (const k in ws) {
+    if (k[0] === '!') continue;
+    const c = ws[k];
+    if (c.t === 'n' && c.z && XLSX.SSF.is_date(c.z)) dateCols.add(XLSX.utils.decode_cell(k).c - rg.s.c);
+  }
   // la fila de encabezados es la primera con al menos 2 celdas de texto
   const hi = data.findIndex(r => r.filter(c => typeof c === 'string' && c.trim() !== '').length >= 2);
   if (hi < 0 || data.length < hi + 2) { alert('No encontré encabezados y datos en esta hoja.'); return; }
   headers = data[hi].map((h, i) => String(h).trim() || 'Columna ' + (i + 1));
   rows = data.slice(hi + 1).map((r, i) => ({ r, n: hi + i + 2 })).filter(x => x.r.some(c => c !== ''));
+  // columnas sin formato de fecha pero con nombre de fecha (o sin título) y valores que parecen fechas
+  headers.forEach((h, i) => {
+    const v = rows.map(x => x.r[i]).filter(y => y !== '');
+    if (v.length && /fecha|vcto|venc|desde|hasta|^Columna/i.test(h) && v.every(y => Number.isInteger(y) && y > 36000 && y < 60000)) dateCols.add(i);
+  });
   fill('cDesde', /vcto|venc|desde|inicio|demanda/i, false);
   fill('cHasta', /fecha.?pago|hasta|fin/i, true);
   fill('cImp', /^pago|import|capital|monto|deuda|saldo/i, false);
@@ -172,15 +186,21 @@ $('go').onclick = () => {
       t2.forEach(t => det.push({ Fila: n, Concepto: 'Interés s/ interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: i1, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
     }
   });
-  out = { res, det, pago };
+  const dc = new Set([...dateCols, iD]); if (iH >= 0) dc.add(iH);
+  out = { res, det, pago, dc };
   render(res, omit);
 };
 
+function shown(v, i) {
+  if (v === undefined || v === null || v === '') return '';
+  if (out.dc.has(i) && typeof v === 'number') return fd(toDate(v));
+  return String(v).replace(/</g, '&lt;');
+}
 function render(res, omit) {
   let total = 0, errs = 0;
   const head = `<tr>${headers.map(h => `<th>${h.replace(/</g, '&lt;')}</th>`).join('')}<th>Interés</th><th>Total</th></tr>`;
   const body = res.map(x => {
-    const cells = headers.map((_, i) => `<td>${String(x.r[i] ?? '').replace(/</g, '&lt;')}</td>`).join('');
+    const cells = headers.map((_, i) => `<td>${shown(x.r[i], i)}</td>`).join('');
     if (x.c.error) { errs++; return `<tr>${cells}<td class="err" colspan="2">${x.c.error}</td></tr>`; }
     total += x.interes;
     return `<tr>${cells}<td class="n">${money(x.interes)}</td><td class="n">${money(x.imp + x.interes)}</td></tr>`;
@@ -197,7 +217,12 @@ $('dl').onclick = () => {
     ...(x.c.error ? [...extra.map(() => ''), '', '', x.c.error]
                   : [...(out.pago ? [x.i1, x.i2] : []), x.interes, +(x.imp + x.interes).toFixed(2), ''])]));
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'Intereses');
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let r = 1; r < aoa.length; r++) out.dc.forEach(c => {            // fechas como fechas de Excel
+    const cell = ws[XLSX.utils.encode_cell({ r, c })];
+    if (cell && cell.t === 'n') cell.z = 'dd/mm/yyyy';
+  });
+  XLSX.utils.book_append_sheet(wb, ws, 'Intereses');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(out.det), 'Detalle');
   XLSX.writeFile(wb, 'intereses_arca.xlsx');
 };
