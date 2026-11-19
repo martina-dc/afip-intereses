@@ -57,10 +57,11 @@
     <div class="grid" style="margin-top:12px">
       <div><label for="cDesde">Fecha de inicio (vencimiento)</label><select id="cDesde"></select></div>
       <div><label for="cHasta" id="lHasta">Fecha de pago (opcional)</label><select id="cHasta"></select></div>
-      <div><label for="cImp">Importe</label><select id="cImp"></select></div>
+      <div><label for="cImp" id="lImp">Importe</label><select id="cImp"></select></div>
+      <div id="boxImp2" hidden><label for="cImp2">Importe si no hay pago (deuda / DDJJ)</label><select id="cImp2"></select></div>
       <div><label for="fHasta" id="lFecha">Fecha de pago única (si no hay columna)</label><input type="date" id="fHasta"></div>
     </div>
-    <div class="note" id="modoNote" hidden>Interés sobre el pago, desde el vencimiento hasta la fecha de pago, más interés sobre ese interés, desde la fecha de pago hasta la fecha de cálculo. Los importes negativos se toman en positivo.</div>
+    <div class="note" id="modoNote" hidden>Filas con fecha de pago: interés sobre el pago, desde el vencimiento hasta la fecha de pago, más interés sobre ese interés, desde la fecha de pago hasta la fecha de cálculo. Filas sin fecha de pago: interés sobre la deuda, desde el vencimiento hasta la fecha de cálculo. Los importes negativos se toman en positivo.</div>
     <div class="row"><button id="go">Calcular</button><span id="msg"></span></div>
   </div>
 
@@ -123,6 +124,7 @@ function loadSheet() {
   fill('cDesde', /vcto|venc|desde|inicio|demanda/i, false);
   fill('cHasta', /fecha.?pago|hasta|fin/i, true);
   fill('cImp', /^pago|import|capital|monto|deuda|saldo/i, false);
+  fill('cImp2', /ddjj|deuda|capital|import|saldo/i, true);
   $('map').hidden = false; $('res').hidden = true; $('msg').textContent = rows.length + ' filas leídas.';
   modoUI();
 }
@@ -139,6 +141,8 @@ function modoUI() {
   $('lHasta').textContent = pago ? 'Fecha de pago' : 'Fecha de pago (opcional)';
   $('lFecha').textContent = pago ? 'Fecha de cálculo (hasta cuándo corren los intereses)' : 'Fecha de pago única (si no hay columna)';
   $('modoNote').hidden = !pago;
+  $('boxImp2').hidden = !pago;
+  $('lImp').textContent = pago ? 'Importe pagado' : 'Importe';
 }
 
 // ---- conversión de valores
@@ -160,7 +164,7 @@ const money = n => n.toLocaleString('es-AR', { minimumFractionDigits: 2, maximum
 
 // ---- cálculo
 $('go').onclick = () => {
-  const iD = +$('cDesde').value, iH = +$('cHasta').value, iI = +$('cImp').value;
+  const iD = +$('cDesde').value, iH = +$('cHasta').value, iI = +$('cImp').value, iI2 = +$('cImp2').value;
   const tipo = $('tipo').value, pago = $('modo').value === 'pago';
   const fu = $('fHasta').value ? toDate($('fHasta').value) : 0;
   if (pago && (iH < 0 || !fu)) { $('msg').innerHTML = '<span class="err">En este modo elegí la columna de fecha de pago y la fecha de cálculo.</span>'; return; }
@@ -169,20 +173,22 @@ $('go').onclick = () => {
   let omit = 0;
   rows.forEach(({ r, n }) => {
     if (r[iD] === '') { omit++; return; }   // sin fecha de inicio: totales o filas vacías
-    const d = toDate(r[iD]), imp = Math.abs(toNum(r[iI]));
-    const h = iH >= 0 ? toDate(r[iH]) : fu;
+    const d = toDate(r[iD]);
+    const impago = pago && (r[iH] === '' || r[iH] === undefined);       // período sin pago: deuda hasta la fecha de cálculo
+    const imp = Math.abs(toNum(impago && iI2 >= 0 ? r[iI2] : r[iI]));
+    const h = impago ? fu : iH >= 0 ? toDate(r[iH]) : fu;
     let c = AfipPunitorios.calcular(d, h, imp, tipo), i1 = 0, i2 = 0, t2 = [];
     if (!c.error) {
       i1 = c.interes;
-      if (pago && h < fu) {
+      if (pago && !impago && h < fu) {
         const c2 = AfipPunitorios.calcular(h, fu, i1, tipo);   // interés sobre el interés
         if (c2.error) c = c2; else { i2 = c2.interes; t2 = c2.tramos; }
       }
     }
-    const x = { r, d, h, imp, i1, i2, c, interes: c.error ? 0 : +(i1 + i2).toFixed(2) };
+    const x = { r, d, h, imp, i1, i2, c, impago, interes: c.error ? 0 : +(i1 + i2).toFixed(2) };
     res.push(x);
     if (!c.error) {
-      c.tramos.forEach(t => det.push({ Fila: n, Concepto: pago ? 'Interés s/ importe' : 'Interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: imp, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
+      c.tramos.forEach(t => det.push({ Fila: n, Concepto: pago ? (impago ? 'Interés s/ deuda' : 'Interés s/ pago') : 'Interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: imp, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
       t2.forEach(t => det.push({ Fila: n, Concepto: 'Interés s/ interés', Desde: fd(t.desde), Hasta: fd(t.hasta), Importe: i1, Días: t.dias, 'Tasa mensual %': t.tasaMensual, 'Tasa diaria %': t.tasaDiaria, Interés: t.interes }));
     }
   });
@@ -211,7 +217,7 @@ function render(res, omit) {
 }
 
 $('dl').onclick = () => {
-  const extra = out.pago ? ['Interés s/ importe', 'Interés s/ interés'] : [];
+  const extra = out.pago ? ['Interés s/ pago o deuda', 'Interés s/ interés'] : [];
   const aoa = [[...headers, ...extra, 'Interés', 'Total', 'Error']];
   out.res.forEach(x => aoa.push([...headers.map((_, i) => x.r[i] ?? ''),
     ...(x.c.error ? [...extra.map(() => ''), '', '', x.c.error]
